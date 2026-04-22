@@ -19,6 +19,8 @@ export async function runReviewWithAgent({ prompt, cwd }) {
   const { stdout, stderr } = await execFileAsync('openclaw', [
     'agent',
     '--local',
+    '--agent', 'main',
+    '--session-id', 'pr-review-agent',
     '--json',
     '--thinking', 'off',
     '--message', wrapper,
