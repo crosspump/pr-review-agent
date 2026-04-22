@@ -1,0 +1,18 @@
+[Unit]
+Description=OpenClaw PR Review Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=openclaw
+WorkingDirectory=/srv/openclaw-workspace/repo
+EnvironmentFile=/srv/openclaw-workspace/repo/.env
+ExecStart=/usr/bin/env bash /srv/openclaw-workspace/repo/scripts/run.sh
+Restart=always
+RestartSec=10
+StandardOutput=append:/srv/openclaw-workspace/repo/.state/service.log
+StandardError=append:/srv/openclaw-workspace/repo/.state/service.log
+
+[Install]
+WantedBy=multi-user.target
