@@ -1,91 +1,80 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { randomBytes } from 'node:crypto';
+
+const execFileAsync = promisify(execFile);
+
 export async function runReviewWithAgent({ prompt, cwd }) {
-  // Simplified inline reviewer: analyze the diff and return structured JSON
-  // This bypasses OpenClaw CLI entirely to avoid session lock issues
+  // Use openclaw agent CLI with a unique ephemeral session to avoid lock conflicts
+  const sessionId = `pr-review-${randomBytes(8).toString('hex')}`;
   
-  const lines = prompt.split('\n');
-  const issues = [];
-  
-  // Extract key info from prompt
-  let prTitle = '';
-  let prBody = '';
-  let changedFiles = [];
-  
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    
-    if (line.includes('"title":')) {
-      const match = line.match(/"title":\s*"([^"]+)"/);
-      if (match) prTitle = match[1];
+  const reviewPrompt = [
+    'You are reviewing a GitHub pull request diff.',
+    'Return valid JSON only, with no markdown fences or extra commentary.',
+    'Use exactly this schema:',
+    '{"summary":"一句话总结","issues":[{"file":"文件路径","severity":"low|medium|high|critical","title":"问题标题","reason":"问题原因","suggestion":"修改建议"}]}',
+    'Only report meaningful issues involving bugs, security, Web3 risks, or missing tests around critical logic.',
+    'Do not give style-only feedback.',
+    'If no obvious problem exists, return {"summary":"no_issue","issues":[]}.',
+    '',
+    prompt,
+  ].join('\n');
+
+  try {
+    const { stdout, stderr } = await execFileAsync('openclaw', [
+      'agent',
+      '--session-id', sessionId,
+      '--json',
+      '--thinking', 'off',
+      '--timeout', '120',
+      '--message', reviewPrompt,
+    ], {
+      cwd,
+      maxBuffer: 16 * 1024 * 1024,
+      env: process.env,
+      timeout: 130000,
+    });
+
+    const raw = String(stdout || '').trim();
+    if (!raw) {
+      throw new Error(`Agent returned empty output${stderr ? `: ${stderr}` : ''}`);
     }
-    
-    if (line.includes('"body":')) {
-      const match = line.match(/"body":\s*"([^"]+)"/);
-      if (match) prBody = match[1];
+
+    let parsedCli;
+    try {
+      parsedCli = JSON.parse(raw);
+    } catch {
+      throw new Error(`Agent CLI returned non-JSON: ${raw.slice(0, 500)}`);
     }
-    
-    if (line.includes('"filename":')) {
-      const match = line.match(/"filename":\s*"([^"]+)"/);
-      if (match) changedFiles.push(match[1]);
+
+    const reply = parsedCli.reply || parsedCli.message || parsedCli.output || parsedCli.text || '';
+    if (!reply) {
+      throw new Error('Agent returned no reply text');
     }
+
+    // Extract JSON from reply (might have markdown fences)
+    const jsonMatch = reply.match(/```json\s*([\s\S]*?)\s*```/) || 
+                     reply.match(/```\s*([\s\S]*?)\s*```/) ||
+                     [null, reply];
+    
+    const jsonText = (jsonMatch[1] || reply).trim();
+    
+    try {
+      return JSON.parse(jsonText);
+    } catch {
+      // Try to extract just the JSON object
+      const objectMatch = jsonText.match(/\{[\s\S]*\}/);
+      if (objectMatch) {
+        return JSON.parse(objectMatch[0]);
+      }
+      throw new Error(`Could not parse JSON from reply: ${jsonText.slice(0, 500)}`);
+    }
+  } catch (error) {
+    console.error('Agent review failed:', error);
+    // Fallback to no_issue on error
+    return {
+      summary: `Review failed: ${error.message}`,
+      issues: [],
+    };
   }
-  
-  // Simple heuristic checks
-  const diffText = prompt.toLowerCase();
-  
-  // Check for common Web3 risks
-  if (diffText.includes('approve(') && !diffText.includes('allowance')) {
-    issues.push({
-      file: 'contract interaction',
-      severity: 'high',
-      title: 'Unchecked approve() call detected',
-      reason: 'approve() without checking current allowance may lead to unexpected token permissions',
-      suggestion: 'Check current allowance before calling approve(), or use increaseAllowance/decreaseAllowance',
-    });
-  }
-  
-  if (diffText.includes('transfer(') && !diffText.includes('require') && !diffText.includes('revert')) {
-    issues.push({
-      file: 'contract interaction',
-      severity: 'medium',
-      title: 'Unchecked transfer() detected',
-      reason: 'transfer() return value should be checked to ensure success',
-      suggestion: 'Check transfer() return value or use SafeERC20',
-    });
-  }
-  
-  if (diffText.includes('chainid') && diffText.includes('71')) {
-    // Conflux eSpace testnet - this is expected, no issue
-  } else if (diffText.includes('chainid') && !diffText.includes('validation')) {
-    issues.push({
-      file: 'network configuration',
-      severity: 'medium',
-      title: 'ChainId usage without validation',
-      reason: 'ChainId should be validated to prevent wrong-network transactions',
-      suggestion: 'Add chainId validation before contract interactions',
-    });
-  }
-  
-  // Check for missing error handling
-  if ((diffText.includes('fetch(') || diffText.includes('await ')) && 
-      !diffText.includes('try') && !diffText.includes('catch')) {
-    issues.push({
-      file: 'async operations',
-      severity: 'low',
-      title: 'Async operations without error handling',
-      reason: 'Unhandled promise rejections can cause silent failures',
-      suggestion: 'Wrap async operations in try-catch blocks',
-    });
-  }
-  
-  // Determine summary
-  let summary;
-  if (issues.length === 0) {
-    summary = 'no_issue';
-  } else if (issues.some(i => i.severity === 'critical' || i.severity === 'high')) {
-    summary = `发现 ${issues.length} 个问题，包含高危风险`;
-  } else {
-    summary = `发现 ${issues.length} 个潜在问题，建议review`;
-  }
-  
-  return { summary, issues };
 }
