@@ -1,63 +1,40 @@
-export async function runReviewWithOpenAICompatible({ model, prompt, apiKey, baseUrl }) {
-  if (!apiKey) {
-    throw new Error('Missing OPENAI_API_KEY for reviewer model call');
-  }
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
-  const endpoint = new URL('/v1/responses', baseUrl || 'https://api.openai.com');
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      input: [
-        {
-          role: 'system',
-          content: [{ type: 'input_text', text: 'Return only strict JSON, no markdown.' }],
-        },
-        {
-          role: 'user',
-          content: [{ type: 'input_text', text: prompt }],
-        },
-      ],
-      text: {
-        format: {
-          type: 'json_object',
-        },
-      },
-    }),
+const execFileAsync = promisify(execFile);
+
+export async function runReviewWithAgent({ prompt, cwd }) {
+  const wrapper = [
+    'You are reviewing a GitHub pull request diff.',
+    'Return valid JSON only.',
+    'Use exactly this schema:',
+    '{"summary":"一句话总结","issues":[{"file":"文件路径","severity":"low|medium|high|critical","title":"问题标题","reason":"问题原因","suggestion":"修改建议"}]}',
+    'Only report meaningful issues involving bugs, security, Web3 risks, or missing tests around critical logic.',
+    'Do not give style-only feedback.',
+    'If no obvious problem exists, return {"summary":"no_issue","issues":[]}.',
+    '',
+    prompt,
+  ].join('\n');
+
+  const { stdout, stderr } = await execFileAsync('openclaw', [
+    'run',
+    '--model', 'openai/gpt-5.4',
+    '--output-last-message',
+    wrapper,
+  ], {
+    cwd,
+    maxBuffer: 8 * 1024 * 1024,
+    env: process.env,
   });
 
-  const raw = await response.text();
-  const data = raw ? JSON.parse(raw) : null;
-
-  if (!response.ok) {
-    throw new Error(`Reviewer API ${response.status}: ${raw}`);
+  const text = String(stdout || '').trim();
+  if (!text) {
+    throw new Error(`Agent review returned empty output${stderr ? `: ${stderr}` : ''}`);
   }
 
-  const outputText = extractOutputText(data);
-  if (!outputText) {
-    throw new Error('Reviewer API returned no output text');
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Agent review did not return valid JSON: ${text.slice(0, 500)}`);
   }
-
-  return JSON.parse(outputText);
-}
-
-function extractOutputText(response) {
-  if (typeof response.output_text === 'string' && response.output_text.trim()) {
-    return response.output_text;
-  }
-
-  const texts = [];
-  for (const item of response.output || []) {
-    for (const content of item.content || []) {
-      if (content.type === 'output_text' && typeof content.text === 'string') {
-        texts.push(content.text);
-      }
-    }
-  }
-
-  return texts.join('\n').trim();
 }
