@@ -198,13 +198,66 @@ export function summarizeFilesForPrompt(files, maxPatchChars) {
 }
 
 export function buildCommentBody(review) {
-  return [
-    'PR Review Result',
-    '',
-    '```json',
-    JSON.stringify(review, null, 2),
-    '```',
-  ].join('\n');
+  const lines = [];
+  
+  // Summary section
+  if (review.summary && review.summary !== 'no_issue') {
+    lines.push(`## 📋 Review Summary`);
+    lines.push('');
+    lines.push(review.summary);
+    lines.push('');
+  }
+  
+  // Issues section
+  if (review.issues && review.issues.length > 0) {
+    lines.push(`## 🔍 Issues Found (${review.issues.length})`);
+    lines.push('');
+    
+    // Group by severity
+    const bySeverity = {
+      critical: [],
+      high: [],
+      medium: [],
+      low: [],
+    };
+    
+    for (const issue of review.issues) {
+      const severity = issue.severity || 'medium';
+      if (bySeverity[severity]) {
+        bySeverity[severity].push(issue);
+      }
+    }
+    
+    // Render by severity
+    const severityOrder = ['critical', 'high', 'medium', 'low'];
+    const severityEmoji = {
+      critical: '🚨',
+      high: '⚠️',
+      medium: '💡',
+      low: 'ℹ️',
+    };
+    
+    for (const severity of severityOrder) {
+      const issues = bySeverity[severity];
+      if (issues.length === 0) continue;
+      
+      lines.push(`### ${severityEmoji[severity]} ${severity.toUpperCase()}`);
+      lines.push('');
+      
+      for (const issue of issues) {
+        lines.push(`**${issue.title}**`);
+        lines.push(`- 📁 File: \`${issue.file}\``);
+        lines.push(`- 📝 Reason: ${issue.reason}`);
+        lines.push(`- 💡 Suggestion: ${issue.suggestion}`);
+        lines.push('');
+      }
+    }
+  }
+  
+  lines.push('---');
+  lines.push('_🤖 Automated review by OpenClaw PR Agent_');
+  
+  return lines.join('\n');
 }
 
 export function buildDedupeKey({ repoFullName, prNumber, headSha }) {

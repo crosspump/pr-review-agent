@@ -4,7 +4,7 @@ import {
   fetchPullRequestFiles,
   fetchRepository,
   listOpenPullRequests,
-  postIssueComment,
+  postPullRequestReview,
 } from './github.js';
 import { runReviewWithAgent } from './reviewer.js';
 import {
@@ -67,11 +67,37 @@ export async function processPullRequest({ repository, pr }) {
   });
 
   const review = normalizeReviewResult(rawReview);
-  const shouldPost = review.issues.length > 0 || config.postNoIssue;
+  
+  // Skip posting if review failed or returned no meaningful content
+  const isEmptyOrFailed = 
+    review.summary === 'no_issue' || 
+    review.summary.startsWith('Review failed:') ||
+    review.summary.includes('chunk_review_failed') ||
+    review.summary.includes('spawn_failed') ||
+    review.summary.includes('parse_error') ||
+    review.summary.includes('no_json_found');
+  
+  const shouldPost = !isEmptyOrFailed && (review.issues.length > 0 || config.postNoIssue);
 
   if (shouldPost && !config.dryRun) {
     const body = buildCommentBody(review);
-    await postIssueComment(config, repository.full_name, pr.number, body);
+    
+    // Determine review event based on severity
+    let event = 'COMMENT';
+    const hasCriticalOrHigh = review.issues.some(i => 
+      i.severity === 'critical' || i.severity === 'high'
+    );
+    
+    if (hasCriticalOrHigh) {
+      event = 'REQUEST_CHANGES';
+    } else if (review.issues.length === 0) {
+      event = 'APPROVE';
+    }
+    
+    await postPullRequestReview(config, repository.full_name, pr.number, {
+      body,
+      event,
+    });
   }
 
   processed.keys[dedupeKey] = {

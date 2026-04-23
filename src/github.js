@@ -85,6 +85,16 @@ export async function postIssueComment(config, repoFullName, prNumber, body) {
   });
 }
 
+export async function postPullRequestReview(config, repoFullName, prNumber, review) {
+  return githubRequest(config, `/repos/${repoFullName}/pulls/${prNumber}/reviews`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(review),
+  });
+}
+
 function safeJsonParse(text) {
   try {
     return JSON.parse(text);
