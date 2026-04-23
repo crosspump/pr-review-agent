@@ -108,7 +108,26 @@ export function normalizeReviewResult(parsed) {
         }))
     : [];
 
-  return { summary, issues };
+  const reportMarkdown = typeof parsed.reportMarkdown === 'string' ? parsed.reportMarkdown : '';
+  const reportPath = typeof parsed.reportPath === 'string' ? parsed.reportPath : '';
+  const backend = typeof parsed.backend === 'string' ? parsed.backend : '';
+  const chunksReviewed = Number.isFinite(Number(parsed.chunksReviewed)) ? Number(parsed.chunksReviewed) : 0;
+
+  const recommendations = Array.isArray(parsed.recommendations)
+    ? parsed.recommendations
+      .filter((item) => typeof item === 'string' && item.trim())
+      .map((item) => item.trim())
+    : [];
+
+  return {
+    summary,
+    issues,
+    reportMarkdown,
+    reportPath,
+    recommendations,
+    backend,
+    chunksReviewed,
+  };
 }
 
 function normalizeSeverity(value) {
@@ -199,20 +218,35 @@ export function summarizeFilesForPrompt(files, maxPatchChars) {
 
 export function buildCommentBody(review) {
   const lines = [];
-  
+
   // Summary section
   if (review.summary && review.summary !== 'no_issue') {
-    lines.push(`## 📋 Review Summary`);
+    lines.push('## 📋 Review Summary');
     lines.push('');
     lines.push(review.summary);
     lines.push('');
   }
-  
+
+  if (review.backend || review.chunksReviewed) {
+    lines.push('## ⚙️ Review Meta');
+    lines.push('');
+    if (review.backend) {
+      lines.push(`- Backend: \`${review.backend}\``);
+    }
+    if (review.chunksReviewed) {
+      lines.push(`- Chunks reviewed: ${review.chunksReviewed}`);
+    }
+    if (review.reportPath) {
+      lines.push(`- Deep report (local): \`${review.reportPath}\``);
+    }
+    lines.push('');
+  }
+
   // Issues section
   if (review.issues && review.issues.length > 0) {
     lines.push(`## 🔍 Issues Found (${review.issues.length})`);
     lines.push('');
-    
+
     // Group by severity
     const bySeverity = {
       critical: [],
@@ -220,14 +254,14 @@ export function buildCommentBody(review) {
       medium: [],
       low: [],
     };
-    
+
     for (const issue of review.issues) {
       const severity = issue.severity || 'medium';
       if (bySeverity[severity]) {
         bySeverity[severity].push(issue);
       }
     }
-    
+
     // Render by severity
     const severityOrder = ['critical', 'high', 'medium', 'low'];
     const severityEmoji = {
@@ -236,14 +270,14 @@ export function buildCommentBody(review) {
       medium: '💡',
       low: 'ℹ️',
     };
-    
+
     for (const severity of severityOrder) {
       const issues = bySeverity[severity];
       if (issues.length === 0) continue;
-      
+
       lines.push(`### ${severityEmoji[severity]} ${severity.toUpperCase()}`);
       lines.push('');
-      
+
       for (const issue of issues) {
         lines.push(`**${issue.title}**`);
         lines.push(`- 📁 File: \`${issue.file}\``);
@@ -253,10 +287,19 @@ export function buildCommentBody(review) {
       }
     }
   }
-  
+
+  if (Array.isArray(review.recommendations) && review.recommendations.length > 0) {
+    lines.push('## ✅ Recommended Next Actions');
+    lines.push('');
+    for (const rec of review.recommendations.slice(0, 8)) {
+      lines.push(`- ${rec}`);
+    }
+    lines.push('');
+  }
+
   lines.push('---');
-  lines.push('_🤖 Automated review by OpenClaw PR Agent_');
-  
+  lines.push('_🤖 Automated deep review by PR Agent_');
+
   return lines.join('\n');
 }
 

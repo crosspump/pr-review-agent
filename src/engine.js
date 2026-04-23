@@ -1,9 +1,11 @@
 import path from 'node:path';
+import { writeFile } from 'node:fs/promises';
 
 import {
   fetchPullRequestFiles,
   fetchRepository,
   listOpenPullRequests,
+  postIssueComment,
   postPullRequestReview,
 } from './github.js';
 import { runReviewWithAgent } from './reviewer.js';
@@ -39,6 +41,24 @@ export async function pollOnce() {
   return results;
 }
 
+export function shouldFallbackToIssueComment(error) {
+  const msg = String(error?.message || '');
+
+  const isPermission403 = msg.includes('GitHub API 403')
+    && msg.includes('Resource not accessible by personal access token');
+
+  const hasPendingReview422 = msg.includes('GitHub API 422')
+    && msg.includes('User can only have one pending review per pull request');
+
+  return isPermission403 || hasPendingReview422;
+}
+
+export function isPostingPermissionError(error) {
+  const msg = String(error?.message || '');
+  return msg.includes('GitHub API 403')
+    && msg.includes('Resource not accessible by personal access token');
+}
+
 export async function processPullRequest({ repository, pr }) {
   const processed = await readJson(stateFile, { keys: {} });
   const dedupeKey = buildDedupeKey({
@@ -67,7 +87,15 @@ export async function processPullRequest({ repository, pr }) {
   });
 
   const review = normalizeReviewResult(rawReview);
-  
+
+  if (review.reportMarkdown) {
+    const reportDir = path.join(config.stateDir, 'reports');
+    await ensureDir(reportDir);
+    const shortSha = String(pr.head?.sha || 'unknown').slice(0, 12);
+    const reportPath = path.join(reportDir, `pr-${pr.number}-${shortSha}.md`);
+    await writeFile(reportPath, `${review.reportMarkdown}\n`, 'utf8');
+    review.reportPath = reportPath;
+  }
   // Skip posting if review failed or returned no meaningful content
   const isEmptyOrFailed = 
     review.summary === 'no_issue' || 
@@ -79,25 +107,45 @@ export async function processPullRequest({ repository, pr }) {
   
   const shouldPost = !isEmptyOrFailed && (review.issues.length > 0 || config.postNoIssue);
 
+  let didPost = false;
+
   if (shouldPost && !config.dryRun) {
     const body = buildCommentBody(review);
-    
+
     // Determine review event based on severity
     let event = 'COMMENT';
-    const hasCriticalOrHigh = review.issues.some(i => 
+    const hasCriticalOrHigh = review.issues.some((i) =>
       i.severity === 'critical' || i.severity === 'high'
     );
-    
+
     if (hasCriticalOrHigh) {
       event = 'REQUEST_CHANGES';
     } else if (review.issues.length === 0) {
       event = 'APPROVE';
     }
-    
-    await postPullRequestReview(config, repository.full_name, pr.number, {
-      body,
-      event,
-    });
+
+    try {
+      await postPullRequestReview(config, repository.full_name, pr.number, {
+        body,
+        event,
+      });
+      didPost = true;
+    } catch (error) {
+      if (!shouldFallbackToIssueComment(error)) {
+        throw error;
+      }
+
+      console.warn(`review API rejected by token, fallback to issue comment on PR #${pr.number}`);
+      try {
+        await postIssueComment(config, repository.full_name, pr.number, body);
+        didPost = true;
+      } catch (commentError) {
+        if (!isPostingPermissionError(commentError)) {
+          throw commentError;
+        }
+        console.warn(`comment API also rejected by token on PR #${pr.number}; skip posting`);
+      }
+    }
   }
 
   processed.keys[dedupeKey] = {
@@ -105,16 +153,16 @@ export async function processPullRequest({ repository, pr }) {
     pr: pr.number,
     sha: pr.head?.sha,
     issues: review.issues.length,
-    posted: shouldPost && !config.dryRun,
+    posted: didPost,
     summary: review.summary,
   };
   await writeJson(stateFile, processed);
 
-  console.log(`processed PR #${pr.number} sha=${pr.head?.sha} issues=${review.issues.length} posted=${shouldPost && !config.dryRun}`);
+  console.log(`processed PR #${pr.number} sha=${pr.head?.sha} issues=${review.issues.length} posted=${didPost}`);
 
   return {
     ok: true,
-    posted: shouldPost && !config.dryRun,
+    posted: didPost,
     issues: review.issues.length,
     summary: review.summary,
   };
