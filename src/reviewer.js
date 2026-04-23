@@ -1,9 +1,9 @@
-export async function runReviewWithAgent({ prompt, cwd }) {
-  const reviewInstructions = [
-    'Reviewing GitHub pull request diff with enhanced heuristics.',
-    'Checking for: Web3 risks, security issues, missing error handling, and code quality.',
-  ].join('\n');
+import { writeFile, unlink } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { randomBytes } from 'node:crypto';
 
+export async function runReviewWithAgent({ prompt, cwd }) {
   try {
     // Split prompt into chunks (max ~10KB per chunk)
     const chunks = splitIntoChunks(prompt, 10000);
@@ -20,7 +20,7 @@ export async function runReviewWithAgent({ prompt, cwd }) {
       
       console.log(`Reviewing chunk ${i + 1}/${chunksToReview.length}...`);
       
-      const result = reviewChunkHeuristic(chunk);
+      const result = await reviewChunkWithSpawn(chunk, i + 1, chunksToReview.length);
       chunkResults.push(result);
     }
     
@@ -84,6 +84,74 @@ function splitIntoChunks(text, maxChunkSize) {
   return chunks;
 }
 
+async function reviewChunkWithSpawn(chunk, chunkNum, totalChunks) {
+  const reviewPrompt = [
+    'You are reviewing a GitHub pull request diff chunk.',
+    'Return valid JSON only, with no markdown fences or extra commentary.',
+    'Use exactly this schema:',
+    '{"summary":"一句话总结","issues":[{"file":"文件路径","severity":"low|medium|high|critical","title":"问题标题","reason":"问题原因","suggestion":"修改建议"}]}',
+    'Only report meaningful issues involving bugs, security, Web3 risks, or missing tests around critical logic.',
+    'Do not give style-only feedback.',
+    'If no obvious problem exists, return {"summary":"no_issue","issues":[]}.',
+    '',
+    `Chunk ${chunkNum}/${totalChunks}:`,
+    '',
+    chunk,
+  ].join('\n');
+
+  try {
+    // Write prompt to temp file for the spawned script to read
+    const tempId = randomBytes(8).toString('hex');
+    const promptPath = join(tmpdir(), `pr-review-${tempId}.txt`);
+    const resultPath = join(tmpdir(), `pr-review-${tempId}.json`);
+    
+    await writeFile(promptPath, reviewPrompt, 'utf8');
+    
+    // Spawn via script that uses sessions_spawn tool
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execFileAsync = promisify(execFile);
+    
+    const scriptPath = join(process.cwd(), 'scripts', 'spawn-chunk-reviewer.sh');
+    
+    await execFileAsync('bash', [scriptPath, promptPath, resultPath], {
+      timeout: 70000,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    
+    // Read result
+    const resultText = await import('node:fs/promises').then(fs => fs.readFile(resultPath, 'utf8'));
+    
+    // Cleanup
+    await unlink(promptPath).catch(() => {});
+    await unlink(resultPath).catch(() => {});
+    
+    // Parse JSON
+    let jsonText = resultText.trim();
+    
+    // Remove markdown fences if present
+    const fenceMatch = jsonText.match(/```json\s*([\s\S]*?)\s*```/) || 
+                      jsonText.match(/```\s*([\s\S]*?)\s*```/);
+    if (fenceMatch) {
+      jsonText = fenceMatch[1].trim();
+    }
+    
+    // Try to find JSON object
+    const objMatch = jsonText.match(/\{[\s\S]*"summary"[\s\S]*\}/);
+    if (objMatch) {
+      jsonText = objMatch[0];
+    }
+    
+    const result = JSON.parse(jsonText);
+    return result;
+  } catch (error) {
+    console.error(`Chunk ${chunkNum} review failed:`, error.message);
+    
+    // Fallback to heuristic for this chunk
+    return reviewChunkHeuristic(chunk);
+  }
+}
+
 function reviewChunkHeuristic(chunk) {
   const issues = [];
   const lowerChunk = chunk.toLowerCase();
@@ -113,29 +181,6 @@ function reviewChunkHeuristic(chunk) {
     });
   }
   
-  if (lowerChunk.includes('chainid') && !lowerChunk.includes('validation') && !lowerChunk.includes('71')) {
-    issues.push({
-      file: files[0] || 'network config',
-      severity: 'medium',
-      title: 'ChainId usage without validation',
-      reason: 'ChainId should be validated to prevent wrong-network transactions',
-      suggestion: 'Add chainId validation before contract interactions',
-    });
-  }
-  
-  // Error Handling
-  if ((lowerChunk.includes('fetch(') || lowerChunk.includes('await ')) && 
-      !lowerChunk.includes('try') && !lowerChunk.includes('catch') &&
-      !lowerChunk.includes('.catch(')) {
-    issues.push({
-      file: files[0] || 'async operations',
-      severity: 'low',
-      title: 'Missing error handling for async operations',
-      reason: 'Unhandled promise rejections can cause silent failures',
-      suggestion: 'Wrap async operations in try-catch blocks or use .catch()',
-    });
-  }
-  
   // Security: Hardcoded secrets
   if (lowerChunk.match(/['"]([a-z0-9]{32,})['"]/i) && 
       (lowerChunk.includes('api') || lowerChunk.includes('key') || lowerChunk.includes('token'))) {
@@ -145,17 +190,6 @@ function reviewChunkHeuristic(chunk) {
       title: 'Possible hardcoded API key or secret',
       reason: 'Hardcoded secrets in code can be exposed in version control',
       suggestion: 'Move secrets to environment variables or secure config',
-    });
-  }
-  
-  // Code Quality: Console logs in production code
-  if (lowerChunk.includes('console.log') || lowerChunk.includes('console.error')) {
-    issues.push({
-      file: files[0] || 'code quality',
-      severity: 'low',
-      title: 'Console statements in code',
-      reason: 'Console logs should be removed or replaced with proper logging in production',
-      suggestion: 'Use a proper logging library or remove debug console statements',
     });
   }
   
