@@ -48,7 +48,7 @@ test('runReviewWithAgent calls DeepSeek-compatible chat completions API and pars
 
   process.env.REVIEWER_PROVIDER = 'deepseek';
   process.env.REVIEWER_BASE_URL = 'https://api.deepseek.com';
-  process.env.REVIEWER_MODEL = 'deepseek-v4-pro';
+  process.env.REVIEWER_MODEL = 'deepseek-v4-flash';
   process.env.DEEPSEEK_API_KEY = 'test-key';
   process.env.REVIEWER_THINKING = 'true';
   process.env.REVIEWER_REASONING_EFFORT = 'high';
@@ -78,7 +78,7 @@ test('runReviewWithAgent calls DeepSeek-compatible chat completions API and pars
 
     assert.equal(result.summary, '发现 1 个问题，包含高危风险');
     assert.equal(result.issues[0].file, 'src/app.js');
-    assert.equal(result.backend, 'deepseek/deepseek-v4-pro');
+    assert.equal(result.backend, 'deepseek/deepseek-v4-flash');
     assert.equal(typeof result.reportMarkdown, 'string');
     assert.match(result.reportMarkdown, /PR Deep Review Report/);
     assert.equal(calls.length, 1);
@@ -87,7 +87,7 @@ test('runReviewWithAgent calls DeepSeek-compatible chat completions API and pars
     assert.equal(calls[0].options.headers.Authorization, 'Bearer test-key');
 
     const body = JSON.parse(calls[0].options.body);
-    assert.equal(body.model, 'deepseek-v4-pro');
+    assert.equal(body.model, 'deepseek-v4-flash');
     assert.deepEqual(body.thinking, { type: 'enabled' });
     assert.equal(body.reasoning_effort, 'high');
     assert.equal(body.stream, false);
@@ -105,7 +105,7 @@ test('runReviewWithAgent reports API failure without heuristic fallback', async 
 
   process.env.REVIEWER_PROVIDER = 'deepseek';
   process.env.REVIEWER_BASE_URL = 'https://api.deepseek.com';
-  process.env.REVIEWER_MODEL = 'deepseek-v4-pro';
+  process.env.REVIEWER_MODEL = 'deepseek-v4-flash';
   process.env.DEEPSEEK_API_KEY = 'test-key';
 
   globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: 'quota exceeded' } }), {
@@ -152,7 +152,7 @@ test('generateDeepReviewReport renders recommendation section', () => {
       'diff --git a/a b/a',
     ].join('\n'),
     summary: '发现 1 个问题，包含高危风险',
-    backend: 'deepseek/deepseek-v4-pro',
+    backend: 'deepseek/deepseek-v4-flash',
     issues: [{
       file: 'src/a.ts',
       severity: 'high',

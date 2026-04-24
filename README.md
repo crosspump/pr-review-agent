@@ -63,7 +63,7 @@ Default reviewer settings:
 ```env
 REVIEWER_PROVIDER=deepseek
 REVIEWER_BASE_URL=https://api.deepseek.com
-REVIEWER_MODEL=deepseek-v4-pro
+REVIEWER_MODEL=deepseek-v4-flash
 DEEPSEEK_API_KEY=replace_me
 REVIEWER_THINKING=true
 REVIEWER_REASONING_EFFORT=high

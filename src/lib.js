@@ -36,7 +36,7 @@ export function getReviewerConfig() {
   return {
     reviewerProvider: process.env.REVIEWER_PROVIDER || 'deepseek',
     reviewerBaseUrl: process.env.REVIEWER_BASE_URL || process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
-    reviewerModel: process.env.REVIEWER_MODEL || 'deepseek-v4-pro',
+    reviewerModel: process.env.REVIEWER_MODEL || 'deepseek-v4-flash',
     reviewerApiKey: process.env.REVIEWER_API_KEY || process.env.DEEPSEEK_API_KEY || '',
     reviewerThinking: (process.env.REVIEWER_THINKING || 'true').toLowerCase() === 'true',
     reviewerReasoningEffort: process.env.REVIEWER_REASONING_EFFORT || 'high',
