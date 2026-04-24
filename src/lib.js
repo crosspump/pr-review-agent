@@ -16,15 +16,13 @@ export function getConfig() {
     githubApiBase: process.env.GITHUB_API_BASE || 'https://api.github.com',
     repoFullName: process.env.GITHUB_REPO || '',
     reviewLanguage: process.env.REVIEW_LANGUAGE || 'auto',
-    reviewerModel: process.env.REVIEWER_MODEL || 'openai/gpt-5.4',
+    ...getReviewerConfig(),
     maxPatchChars: Number(process.env.MAX_PATCH_CHARS || DEFAULT_MAX_PATCH_CHARS),
     maxFiles: Number(process.env.MAX_FILES || DEFAULT_MAX_FILES),
     pollIntervalMs: Number(process.env.POLL_INTERVAL_MS || DEFAULT_POLL_INTERVAL_MS),
     stateDir: process.env.STATE_DIR || path.resolve(process.cwd(), '.state'),
     postNoIssue: (process.env.POST_NO_ISSUE || 'false').toLowerCase() === 'true',
     dryRun: (process.env.DRY_RUN || 'false').toLowerCase() === 'true',
-    openclawGatewayUrl: process.env.OPENCLAW_GATEWAY_URL || '',
-    openclawGatewayToken: process.env.OPENCLAW_GATEWAY_TOKEN || '',
   };
 
   if (!config.repoFullName) {
@@ -32,6 +30,17 @@ export function getConfig() {
   }
 
   return config;
+}
+
+export function getReviewerConfig() {
+  return {
+    reviewerProvider: process.env.REVIEWER_PROVIDER || 'deepseek',
+    reviewerBaseUrl: process.env.REVIEWER_BASE_URL || process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
+    reviewerModel: process.env.REVIEWER_MODEL || 'deepseek-v4-pro',
+    reviewerApiKey: process.env.REVIEWER_API_KEY || process.env.DEEPSEEK_API_KEY || '',
+    reviewerThinking: (process.env.REVIEWER_THINKING || 'true').toLowerCase() === 'true',
+    reviewerReasoningEffort: process.env.REVIEWER_REASONING_EFFORT || 'high',
+  };
 }
 
 export function verifySignature({ bodyBuffer, signatureHeader, secret }) {

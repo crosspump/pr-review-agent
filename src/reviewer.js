@@ -1,59 +1,47 @@
-import { mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
+import { getReviewerConfig } from './lib.js';
 
 const MAX_RECOMMENDATIONS = 8;
+const DEFAULT_CHUNK_CHARS = 10000;
+const REQUEST_TIMEOUT_MS = 120000;
 
-export async function runReviewWithAgent({ prompt, cwd }) {
+export async function runReviewWithAgent({ prompt }) {
   try {
-    const chunks = splitIntoChunks(prompt, 10000);
-    console.log(`Reviewing ${chunks.length} chunks (testing with first 3)...`);
+    const config = getReviewerConfig();
+    const chunks = splitIntoChunks(prompt, DEFAULT_CHUNK_CHARS);
+    const maxChunks = Number(process.env.MAX_REVIEW_CHUNKS || chunks.length);
+    const chunksToReview = chunks.slice(0, Math.max(1, maxChunks));
+    const backend = `${config.reviewerProvider}/${config.reviewerModel}`;
 
-    // Keep current behavior: review first 3 chunks only.
-    const chunksToReview = chunks.slice(0, 3);
+    console.log(`Reviewing ${chunksToReview.length}/${chunks.length} chunks with ${backend}...`);
+
     const chunkResults = [];
-    const backend = resolveReviewerBackend();
-
-    for (let i = 0; i < chunksToReview.length; i++) {
+    for (let i = 0; i < chunksToReview.length; i += 1) {
       const chunk = chunksToReview[i];
-      console.log(`Reviewing chunk ${i + 1}/${chunksToReview.length} backend=${backend}...`);
-
-      const result = await reviewChunk({
+      console.log(`Reviewing chunk ${i + 1}/${chunksToReview.length}...`);
+      const result = await reviewChunkWithChatCompletions({
+        config,
         chunk,
         chunkNum: i + 1,
         totalChunks: chunksToReview.length,
-        cwd,
-        backend,
       });
-      chunkResults.push(result);
+      chunkResults.push({
+        ...result,
+        analysis: analyzeChunkDeep(chunk),
+      });
     }
 
-    const allIssues = chunkResults.flatMap((r) => r.issues || []);
-
-    // Deduplicate issues by file+title
-    const uniqueIssues = [];
-    const seen = new Set();
-    for (const issue of allIssues) {
-      const key = `${issue.file}:${issue.title}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        uniqueIssues.push(issue);
-      }
-    }
+    const uniqueIssues = dedupeIssues(chunkResults.flatMap((result) => result.issues || []));
 
     let summary;
     if (uniqueIssues.length === 0) {
       summary = 'no_issue';
-    } else if (uniqueIssues.some((i) => i.severity === 'critical' || i.severity === 'high')) {
+    } else if (uniqueIssues.some((issue) => issue.severity === 'critical' || issue.severity === 'high')) {
       summary = `发现 ${uniqueIssues.length} 个问题，包含高危风险`;
     } else {
       summary = `发现 ${uniqueIssues.length} 个潜在问题`;
     }
 
-    const analyses = chunkResults.map((r) => r.analysis).filter(Boolean);
+    const analyses = chunkResults.map((result) => result.analysis).filter(Boolean);
     const reportMarkdown = generateDeepReviewReport({
       prompt,
       summary,
@@ -61,7 +49,6 @@ export async function runReviewWithAgent({ prompt, cwd }) {
       analyses,
       backend,
     });
-
     const recommendations = buildRecommendations(analyses, uniqueIssues);
 
     return {
@@ -73,7 +60,7 @@ export async function runReviewWithAgent({ prompt, cwd }) {
       chunksReviewed: chunksToReview.length,
     };
   } catch (error) {
-    console.error('Chunked review failed:', error);
+    console.error('Review failed:', error);
     return {
       summary: `Review failed: ${error.message}`,
       issues: [],
@@ -82,27 +69,14 @@ export async function runReviewWithAgent({ prompt, cwd }) {
 }
 
 export function resolveReviewerBackend() {
-  const configured = String(process.env.REVIEWER_BACKEND || 'hermes').toLowerCase();
-
-  if (configured === 'auto') {
-    if (process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY) {
-      return 'openclaw';
-    }
-    return 'hermes';
-  }
-
-  if (configured === 'openclaw' || configured === 'heuristic' || configured === 'hermes') {
-    return configured;
-  }
-
-  return 'hermes';
+  const config = getReviewerConfig();
+  return config.reviewerProvider;
 }
 
 function splitIntoChunks(text, maxChunkSize) {
   const chunks = [];
   let currentChunk = '';
-
-  const fileDiffs = text.split(/(?=diff --git)/);
+  const fileDiffs = String(text || '').split(/(?=diff --git)/);
 
   for (const fileDiff of fileDiffs) {
     if (currentChunk.length + fileDiff.length > maxChunkSize && currentChunk.length > 0) {
@@ -117,90 +91,69 @@ function splitIntoChunks(text, maxChunkSize) {
     chunks.push(currentChunk);
   }
 
-  return chunks;
+  return chunks.length > 0 ? chunks : [''];
 }
 
-async function reviewChunk({ chunk, chunkNum, totalChunks, cwd, backend }) {
-  if (backend === 'heuristic') {
-    return reviewChunkHeuristic(chunk);
+async function reviewChunkWithChatCompletions({ config, chunk, chunkNum, totalChunks }) {
+  if (!config.reviewerApiKey) {
+    throw new Error(`missing_api_key:${apiKeyHint(config.reviewerProvider)}`);
   }
 
-  try {
-    if (backend === 'hermes') {
-      const hermesResult = await reviewChunkWithHermesAgent({ chunk, chunkNum, totalChunks, cwd });
-      const analysis = analyzeChunkDeep(chunk);
-      return {
-        ...hermesResult,
-        analysis,
-      };
-    }
-
-    const aiResult = await reviewChunkWithOpenClawInfer({ chunk, chunkNum, totalChunks, cwd });
-    const analysis = analyzeChunkDeep(chunk);
-    return {
-      ...aiResult,
-      analysis,
-    };
-  } catch (error) {
-    const shouldFallback = String(process.env.REVIEWER_FALLBACK_HEURISTIC || 'true').toLowerCase() !== 'false';
-    if (shouldFallback) {
-      console.warn(`${backend} review failed, fallback to heuristic: ${error.message}`);
-      return reviewChunkHeuristic(chunk);
-    }
-    throw error;
-  }
-}
-
-async function reviewChunkWithOpenClawInfer({ chunk, chunkNum, totalChunks, cwd }) {
-  const reviewPrompt = [
-    'You are reviewing a GitHub pull request diff chunk.',
-    'Return valid JSON only, with no markdown fences or extra commentary.',
-    'Use exactly this schema:',
-    '{"summary":"一句话总结","issues":[{"file":"文件路径","severity":"low|medium|high|critical","title":"问题标题","reason":"问题原因","suggestion":"修改建议"}]}',
-    'Only report meaningful issues involving bugs, security, Web3 risks, or missing tests around critical logic.',
-    'Do not give style-only feedback.',
-    'If no obvious problem exists, return {"summary":"no_issue","issues":[]}.',
-    '',
-    `Chunk ${chunkNum}/${totalChunks}:`,
-    '',
-    chunk,
-  ].join('\n');
-
-  const model = process.env.REVIEWER_MODEL || 'openai/gpt-5.4';
-  const tmpDir = process.env.REVIEW_TMP_DIR || join(cwd || process.cwd(), '.state', 'tmp');
-  await mkdir(tmpDir, { recursive: true });
-
-  const { stdout } = await execFileAsync(
-    'openclaw',
-    [
-      'infer',
-      'model',
-      'run',
-      '--local',
-      '--json',
-      '--model',
-      model,
-      '--prompt',
-      reviewPrompt,
+  const reviewPrompt = buildChunkReviewPrompt({ chunk, chunkNum, totalChunks });
+  const body = {
+    model: config.reviewerModel,
+    messages: [
+      {
+        role: 'system',
+        content: [
+          'You are a senior GitHub Pull Request review agent.',
+          'Return valid JSON only, with no markdown fences or extra commentary.',
+          'Only report meaningful issues involving bugs, security, Web3 risks, or missing tests around critical logic.',
+          'Do not give style-only feedback.',
+        ].join(' '),
+      },
+      { role: 'user', content: reviewPrompt },
     ],
-    {
-      timeout: 120000,
-      maxBuffer: 16 * 1024 * 1024,
-      env: {
-        ...process.env,
-        TMPDIR: tmpDir,
-      },
-    },
-  );
+    stream: false,
+  };
 
-  return extractReviewJson(stdout);
+  if (config.reviewerThinking) {
+    body.thinking = { type: 'enabled' };
+  }
+  if (config.reviewerReasoningEffort) {
+    body.reasoning_effort = config.reviewerReasoningEffort;
+  }
+
+  const url = `${String(config.reviewerBaseUrl).replace(/\/$/, '')}/chat/completions`;
+  const response = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.reviewerApiKey}`,
+    },
+    body: JSON.stringify(body),
+  }, REQUEST_TIMEOUT_MS);
+
+  const responseText = await response.text();
+  const responsePayload = safeJsonParse(responseText);
+
+  if (!response.ok) {
+    const message = responsePayload?.error?.message || responseText || response.statusText;
+    throw new Error(`reviewer_api_error:${response.status}:${message}`);
+  }
+
+  const content = extractChatCompletionText(responsePayload);
+  if (!content) {
+    throw new Error('reviewer_empty_response');
+  }
+
+  return extractReviewJson(content);
 }
 
-async function reviewChunkWithHermesAgent({ chunk, chunkNum, totalChunks, cwd }) {
-  const reviewPrompt = [
-    'You are reviewing a GitHub pull request diff chunk.',
-    'Return valid JSON only, with no markdown fences or extra commentary.',
-    'Use exactly this schema:',
+function buildChunkReviewPrompt({ chunk, chunkNum, totalChunks }) {
+  return [
+    'Review this GitHub pull request diff chunk.',
+    'Use exactly this JSON schema:',
     '{"summary":"一句话总结","issues":[{"file":"文件路径","severity":"low|medium|high|critical","title":"问题标题","reason":"问题原因","suggestion":"修改建议"}]}',
     'Only report meaningful issues involving bugs, security, Web3 risks, or missing tests around critical logic.',
     'Do not give style-only feedback.',
@@ -210,48 +163,50 @@ async function reviewChunkWithHermesAgent({ chunk, chunkNum, totalChunks, cwd })
     '',
     chunk,
   ].join('\n');
-
-  const model = process.env.REVIEWER_MODEL || '';
-  const hermesBin = process.env.REVIEWER_HERMES_BIN || 'hermes';
-  const timeoutMs = Number(process.env.REVIEWER_HERMES_TIMEOUT_MS || 180000);
-
-  const args = ['chat', '-q', reviewPrompt, '--quiet'];
-  if (model) {
-    args.push('--model', model);
-  }
-
-  const { stdout } = await execFileAsync(
-    hermesBin,
-    args,
-    {
-      cwd: cwd || process.cwd(),
-      timeout: timeoutMs,
-      maxBuffer: 16 * 1024 * 1024,
-      env: {
-        ...process.env,
-      },
-    },
-  );
-
-  return extractReviewJson(stdout);
 }
 
-export function reviewChunkHeuristic(chunk) {
-  const analysis = analyzeChunkDeep(chunk);
+function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal })
+    .finally(() => clearTimeout(timer));
+}
 
-  if (analysis.issues.length === 0) {
-    return {
-      summary: 'no_issue',
-      issues: [],
-      analysis,
-    };
+function extractChatCompletionText(payload) {
+  return payload?.choices?.[0]?.message?.content
+    || payload?.choices?.[0]?.text
+    || payload?.output_text
+    || '';
+}
+
+function safeJsonParse(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function apiKeyHint(provider) {
+  if (provider === 'deepseek') {
+    return 'DEEPSEEK_API_KEY';
+  }
+  return 'REVIEWER_API_KEY';
+}
+
+function dedupeIssues(issues) {
+  const uniqueIssues = [];
+  const seen = new Set();
+
+  for (const issue of issues) {
+    const key = `${issue.file}:${issue.title}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      uniqueIssues.push(issue);
+    }
   }
 
-  return {
-    summary: `heuristic_review_found_${analysis.issues.length}_issues`,
-    issues: analysis.issues,
-    analysis,
-  };
+  return uniqueIssues;
 }
 
 export function analyzeChunkDeep(chunk) {

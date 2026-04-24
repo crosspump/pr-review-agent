@@ -2,7 +2,7 @@ export async function githubRequest(config, pathname, options = {}) {
   const url = new URL(pathname, config.githubApiBase);
   const headers = {
     'Accept': 'application/vnd.github+json',
-    'User-Agent': 'openclaw-pr-review-agent',
+    'User-Agent': 'pr-review-agent',
     ...(options.headers || {}),
   };
 

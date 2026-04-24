@@ -41,41 +41,92 @@ test('extractReviewJson handles diagnostic preamble + outputs array', () => {
   assert.equal(out.summary, 'no_issue');
 });
 
-test('runReviewWithAgent in heuristic mode flags risky approve pattern without model key', async () => {
-  const oldBackend = process.env.REVIEWER_BACKEND;
-  delete process.env.OPENAI_API_KEY;
-  process.env.REVIEWER_BACKEND = 'heuristic';
+test('runReviewWithAgent calls DeepSeek-compatible chat completions API and parses JSON review', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnv = { ...process.env };
+  const calls = [];
 
-  const prompt = [
-    'Repository:',
-    '{"full_name":"cryptosunshine/dapp-builder"}',
-    '',
-    'Pull Request:',
-    '{"number":2,"title":"test","head":"feature","base":"main"}',
-    '',
-    'Changed files:',
-    '[]',
-    '',
-    'Unified diff excerpt:',
-    'diff --git a/src/token.ts b/src/token.ts',
-    '+await token.approve(spender, amount);',
-  ].join('\n');
+  process.env.REVIEWER_PROVIDER = 'deepseek';
+  process.env.REVIEWER_BASE_URL = 'https://api.deepseek.com';
+  process.env.REVIEWER_MODEL = 'deepseek-v4-pro';
+  process.env.DEEPSEEK_API_KEY = 'test-key';
+  process.env.REVIEWER_THINKING = 'true';
+  process.env.REVIEWER_REASONING_EFFORT = 'high';
 
-  const out = await runReviewWithAgent({ prompt, cwd: process.cwd() });
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return new Response(JSON.stringify({
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            summary: '发现 1 个问题，包含高危风险',
+            issues: [{
+              file: 'src/app.js',
+              severity: 'high',
+              title: 'Unsafe transaction handling',
+              reason: 'Missing transaction error handling',
+              suggestion: 'Add explicit error handling and user feedback',
+            }],
+          }),
+        },
+      }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
 
-  if (oldBackend === undefined) {
-    delete process.env.REVIEWER_BACKEND;
-  } else {
-    process.env.REVIEWER_BACKEND = oldBackend;
+  try {
+    const result = await runReviewWithAgent({ prompt: 'diff --git a/src/app.js b/src/app.js\n+sendTransaction()' });
+
+    assert.equal(result.summary, '发现 1 个问题，包含高危风险');
+    assert.equal(result.issues[0].file, 'src/app.js');
+    assert.equal(result.backend, 'deepseek/deepseek-v4-pro');
+    assert.equal(typeof result.reportMarkdown, 'string');
+    assert.match(result.reportMarkdown, /PR Deep Review Report/);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://api.deepseek.com/chat/completions');
+    assert.equal(calls[0].options.method, 'POST');
+    assert.equal(calls[0].options.headers.Authorization, 'Bearer test-key');
+
+    const body = JSON.parse(calls[0].options.body);
+    assert.equal(body.model, 'deepseek-v4-pro');
+    assert.deepEqual(body.thinking, { type: 'enabled' });
+    assert.equal(body.reasoning_effort, 'high');
+    assert.equal(body.stream, false);
+    assert.equal(body.messages[0].role, 'system');
+    assert.equal(body.messages[1].role, 'user');
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env = originalEnv;
   }
-
-  assert.ok(out.issues.length >= 1);
-  assert.equal(out.issues[0].severity, 'high');
-  assert.equal(typeof out.reportMarkdown, 'string');
-  assert.match(out.reportMarkdown, /PR Deep Review Report/);
 });
 
-test('analyzeChunkDeep catches secret-like literal', () => {
+test('runReviewWithAgent reports API failure without heuristic fallback', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnv = { ...process.env };
+
+  process.env.REVIEWER_PROVIDER = 'deepseek';
+  process.env.REVIEWER_BASE_URL = 'https://api.deepseek.com';
+  process.env.REVIEWER_MODEL = 'deepseek-v4-pro';
+  process.env.DEEPSEEK_API_KEY = 'test-key';
+
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: 'quota exceeded' } }), {
+    status: 429,
+    statusText: 'Too Many Requests',
+    headers: { 'content-type': 'application/json' },
+  });
+
+  try {
+    const result = await runReviewWithAgent({ prompt: 'diff --git a/app.js b/app.js\n+const addr = "0xDEADBEEF";' });
+
+    assert.match(result.summary, /^Review failed: reviewer_api_error:429/);
+    assert.deepEqual(result.issues, []);
+    assert.equal(result.reportMarkdown, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env = originalEnv;
+  }
+});
+
+test('analyzeChunkDeep catches secret-like literal for report signals', () => {
   const chunk = [
     'diff --git a/src/config.ts b/src/config.ts',
     '+const PRIVATE_KEY = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";',
@@ -101,7 +152,7 @@ test('generateDeepReviewReport renders recommendation section', () => {
       'diff --git a/a b/a',
     ].join('\n'),
     summary: '发现 1 个问题，包含高危风险',
-    backend: 'heuristic',
+    backend: 'deepseek/deepseek-v4-pro',
     issues: [{
       file: 'src/a.ts',
       severity: 'high',
@@ -120,26 +171,12 @@ test('generateDeepReviewReport renders recommendation section', () => {
   assert.match(report, /Repository: cryptosunshine\/dapp-builder/);
 });
 
-test('resolveReviewerBackend supports hermes and auto->hermes', () => {
-  const old = process.env.REVIEWER_BACKEND;
-  const oldOpenai = process.env.OPENAI_API_KEY;
-  const oldOpenrouter = process.env.OPENROUTER_API_KEY;
+test('resolveReviewerBackend returns configured provider', () => {
+  const old = process.env.REVIEWER_PROVIDER;
 
-  delete process.env.OPENAI_API_KEY;
-  delete process.env.OPENROUTER_API_KEY;
+  process.env.REVIEWER_PROVIDER = 'deepseek';
+  assert.equal(resolveReviewerBackend(), 'deepseek');
 
-  process.env.REVIEWER_BACKEND = 'hermes';
-  assert.equal(resolveReviewerBackend(), 'hermes');
-
-  process.env.REVIEWER_BACKEND = 'auto';
-  assert.equal(resolveReviewerBackend(), 'hermes');
-
-  if (old === undefined) delete process.env.REVIEWER_BACKEND;
-  else process.env.REVIEWER_BACKEND = old;
-
-  if (oldOpenai === undefined) delete process.env.OPENAI_API_KEY;
-  else process.env.OPENAI_API_KEY = oldOpenai;
-
-  if (oldOpenrouter === undefined) delete process.env.OPENROUTER_API_KEY;
-  else process.env.OPENROUTER_API_KEY = oldOpenrouter;
+  if (old === undefined) delete process.env.REVIEWER_PROVIDER;
+  else process.env.REVIEWER_PROVIDER = old;
 });

@@ -96,16 +96,19 @@ export async function processPullRequest({ repository, pr }) {
     await writeFile(reportPath, `${review.reportMarkdown}\n`, 'utf8');
     review.reportPath = reportPath;
   }
-  // Skip posting if review failed or returned no meaningful content
-  const isEmptyOrFailed = 
-    review.summary === 'no_issue' || 
-    review.summary.startsWith('Review failed:') ||
-    review.summary.includes('chunk_review_failed') ||
-    review.summary.includes('spawn_failed') ||
-    review.summary.includes('parse_error') ||
-    review.summary.includes('no_json_found');
-  
-  const shouldPost = !isEmptyOrFailed && (review.issues.length > 0 || config.postNoIssue);
+  const isReviewFailed = review.summary.startsWith('Review failed:');
+  if (isReviewFailed) {
+    console.error(`AI deep review failed for PR #${pr.number} sha=${pr.head?.sha}: ${review.summary}`);
+    return {
+      ok: false,
+      retriable: true,
+      posted: false,
+      issues: 0,
+      summary: review.summary,
+    };
+  }
+
+  const shouldPost = review.issues.length > 0 || config.postNoIssue;
 
   let didPost = false;
 

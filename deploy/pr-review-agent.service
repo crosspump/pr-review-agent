@@ -1,5 +1,5 @@
 [Unit]
-Description=OpenClaw PR Review Agent
+Description=PR Review Agent
 After=network-online.target
 Wants=network-online.target
 
