@@ -41,3 +41,18 @@ test('buildCommentBody renders meta and recommendations', () => {
   assert.match(body, /Backend: `heuristic`/);
   assert.match(body, /Recommended Next Actions/);
 });
+
+test('buildCommentBody makes no-issue approvals explicit', () => {
+  const body = buildCommentBody({
+    summary: 'no_issue',
+    backend: 'deepseek/deepseek-v4-flash',
+    chunksReviewed: 1,
+    reportPath: '.state/reports/pr-4-abc.md',
+    issues: [],
+    recommendations: [],
+  });
+
+  assert.match(body, /Review Summary/);
+  assert.match(body, /No blocking issues found/);
+  assert.match(body, /Issues Found \(0\)/);
+});

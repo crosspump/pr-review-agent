@@ -229,10 +229,14 @@ export function buildCommentBody(review) {
   const lines = [];
 
   // Summary section
-  if (review.summary && review.summary !== 'no_issue') {
+  if (review.summary) {
     lines.push('## 📋 Review Summary');
     lines.push('');
-    lines.push(review.summary);
+    if (review.summary === 'no_issue') {
+      lines.push('No blocking issues found by the automated AI review.');
+    } else {
+      lines.push(review.summary);
+    }
     lines.push('');
   }
 
@@ -252,7 +256,12 @@ export function buildCommentBody(review) {
   }
 
   // Issues section
-  if (review.issues && review.issues.length > 0) {
+  if (review.issues && review.issues.length === 0) {
+    lines.push('## 🔍 Issues Found (0)');
+    lines.push('');
+    lines.push('- No issues were reported by the reviewer model.');
+    lines.push('');
+  } else if (review.issues && review.issues.length > 0) {
     lines.push(`## 🔍 Issues Found (${review.issues.length})`);
     lines.push('');
 
